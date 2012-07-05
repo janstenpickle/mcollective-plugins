@@ -34,6 +34,7 @@ include MCollective::RPC
 # - settings passed on the command line
 #
 @config = { :interval => 30,
+  :runinterval => 20,
   :concurrency => false,
   :logfile => "/dev/null",
   :filter => "",
@@ -116,6 +117,12 @@ def run_client(client)
   @puppet.custom_request("runonce", {:forcerun => true}, client, {"identity" => client})
 end
 
+# This sends a status request to a specific client
+def status_client(client)
+  return @puppet.custom_request("status", {}, client, {"identity" => client})[0]
+end
+
+
 # This is the beef of things, we take a desired interval and
 # maximum allowed concurrency and basically performs the following
 # pseudo actions:
@@ -131,7 +138,7 @@ end
 #   up new nodes and recover gracefully from network outages and such.
 #
 # TODO: Add exception handling.
-def run(interval, concurrency)
+def run(interval, runinterval, concurrency)
   @puppet.reset
 
   log("Doing discovery start of run")
@@ -160,7 +167,15 @@ def run(interval, concurrency)
 
         if concurrency
           if cur_concurrency < concurrency
-            run_client(client)
+            status = status_client(client)
+            lastrun = status.results[:data][:lastrun].to_i
+            minutes_since_run = (Time.now.to_i - lastrun)/60
+            log("Last puppet run on client #{client} was #{minutes_since_run} minutes ago")
+            if minutes_since_run >= runinterval
+              run_client(client)
+            else
+              log("Puppet run for client #{client} skipped due to last run being #{minutes_since_run} minutes ago, which is less than threshold of #{runinterval}")
+            end
           else
             log("Puppet run for client #{client} skipped due to current concurrency of #{cur_concurrency}")
           end
@@ -183,12 +198,12 @@ def run(interval, concurrency)
 end
 
 def connect
-  @puppet = rpcclient("puppetd", :options => @options)
+  @puppet = rpcclient("puppetd")
   @puppet.progress = false
 
   # do some naive parsing of the filter, this is pretty poor and should be set using
   # the new in 1.1.0 MCOLLECTIVE_EXTRA_OPTS setting
-  if @puppet.options[:filter]["fact"] == [] || @puppet.options[:filter]["cf_class"] == []
+  if @options[:filter]["fact"] == [] || @options[:filter]["cf_class"] == []
     @config[:filter].split(" ").each do |f|
       if f =~ /^(.+?)=(.+)/
         @puppet.fact_filter $1, $2
@@ -203,7 +218,7 @@ end
 def foreground
   connect
   loop do
-    run(@config[:interval], @config[:concurrency])
+    run(@config[:interval], @config[:runinterval], @config[:concurrency])
   end
 end
 
@@ -225,8 +240,8 @@ def background
     connect
     loop do
       begin
-        log("Starting run: interval: #{@config[:interval]} concurrency: #{@config[:concurrency]}")
-        run(@config[:interval], @config[:concurrency])
+        log("Starting run: interval: #{@config[:interval]} puppet run interval: #{@config[:interval]} concurrency: #{@config[:concurrency]}")
+        run(@config[:interval], @config[:runinterval], @config[:concurrency])
         log("Run ended, restarting")
       rescue Exception => e
         log("Runner raised an exception: #{e}")
